@@ -2,11 +2,15 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 
 	"github.com/qri-io/starlib"
@@ -83,6 +87,40 @@ func ExecHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	wrote := false
+
+	cpf, err := os.Create("cpuprofile")
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	err = pprof.StartCPUProfile(cpf)
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	mpf, err := os.Create("memprofile")
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	pf, err := os.Create("profile")
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	err = starlark.StartProfile(pf)
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
 	thread := &starlark.Thread{
 		// print func writes directly to the response writer
 		Print: func(thread *starlark.Thread, msg string) {
@@ -100,6 +138,49 @@ func ExecHandler(w http.ResponseWriter, r *http.Request) {
 
 	if wrote == false {
 		w.Write([]byte("(no output)"))
+	}
+
+	pprof.StopCPUProfile()
+	err = cpf.Close()
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	runtime.GC()
+	err = pprof.Lookup("heap").WriteTo(mpf, 0)
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	err = mpf.Close()
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	err = starlark.StopProfile()
+	if err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	cpf.Sync()
+
+	var stdBuffer bytes.Buffer
+	mw := io.MultiWriter(os.Stdout, &stdBuffer)
+	cmd := exec.Command("go", "tool", "pprof", "-top", "cpuprofile")
+	cmd.Stdout = mw
+	cmd.Stderr = mw
+
+	if err := cmd.Run(); err != nil {
+		log.Error(err.Error())
+		writeError(w, http.StatusInternalServerError, err)
+		return
 	}
 }
 
